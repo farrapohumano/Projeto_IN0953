@@ -1,0 +1,11 @@
+.idea
+.venv
+*.tar
+*.log
+build
+*.spec
+*.py[cod]
+*$py.class
+__pycache__/
+
+
