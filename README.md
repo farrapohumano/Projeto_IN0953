@@ -35,4 +35,9 @@ On Linux, the launcher uses Docker host networking and checks Ollama connectivit
 
 When the `LLM` or `LLMOSA` algorithm, or the `LLM` assertion generator, is selected, the runner asks for the model, temperature, and response caching. `LLMOSA` additionally prompts for initial-population settings, uncovered-target and stall calls, coverage threshold, plateau length, and maximum interventions.
 
-Repositories must contain their runtime dependencies or use dependencies already installed in the image. Add project-specific dependencies to `requirements.txt` before building when needed.
+Use the interactive `requirements` operation to select a cloned repository and install dependencies from one or more discovered `requirements.txt` files with `python -m pip install -r`.
+
+## Pynguin source
+
+Clone the Pynguin git into `scripts/pynguin`.
+The image copies the cloned Pynguin repository from `scripts/pynguin` to `/opt/pynguin` and installs it in editable mode with the OpenAI extra. `/opt/pynguin/src` is exposed through `PYTHONPATH`, so the container executes the cloned source instead of the PyPI release.

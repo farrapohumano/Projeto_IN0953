@@ -100,6 +100,110 @@ class PynguinRunner:
 
         return destination
 
+    def find_requirements_files(self, repo: Path) -> list[Path]:
+        """
+
+        :param repo:
+        :return:
+        """
+        ignored = {".git", ".venv", "venv", "build", "dist", "site-packages"}
+        return sorted(
+            path for path in repo.rglob("requirements.txt")
+            if not any(part in ignored or part.startswith(".") for part in path.relative_to(repo).parts)
+        )
+
+    def install_requirements(self, repo: Path, requirements_file: Path) -> int:
+        """
+
+        :param repo:
+        :param requirements_file:
+        :return:
+        """
+        command = [sys.executable, "-m", "pip", "install", "-r", str(requirements_file)]
+        self.console.print(f"[dim]$ {shlex.join(command)}[/]")
+        result = subprocess.run(command, cwd=repo, check=False)
+        if result.returncode == 0:
+            self.console.print(f"[green]Installed requirements from:[/] {requirements_file}")
+        else:
+            self.console.print(f"[red]Requirements installation failed with exit code {result.returncode}:[/] {requirements_file}")
+        return result.returncode
+
+    def _interactive_install_requirements(self) -> None:
+        """
+
+        :return:
+        """
+        repo = self._choose("Repository", self.repositories)
+        files = self.find_requirements_files(repo)
+        if not files:
+            self.console.print(f"[yellow]No requirements.txt files found in:[/] {repo}")
+            return
+
+        self._numbered("Requirements files", [str(path.relative_to(repo)) for path in files])
+        selection = Prompt.ask("Requirements file numbers separated by commas, or 'all'", default="1")
+        selected = files if selection.lower() == "all" else self._indexes(files, selection)
+        if not selected:
+            self.console.print("[red]No valid requirements files selected.[/]")
+            return
+
+        if not Confirm.ask(f"Install dependencies from {len(selected)} requirements file(s)?", default=True):
+            return
+        for requirements_file in selected:
+            self.install_requirements(repo, requirements_file)
+
+    def install_repository_requirements(self, repo: Path) -> bool:
+        """
+
+        :param repo:
+        :return:
+        """
+        files = self.find_requirements_files(repo)
+        if not files:
+            self.console.print(f"[yellow]No requirements.txt files found in:[/] {repo}")
+            return False
+        self._numbered("Requirements files", [str(path.relative_to(repo)) for path in files])
+        if not Confirm.ask("Install repository requirements before running Pynguin?", default=True):
+            return False
+        return all(self.install_requirements(repo, path) == 0 for path in files)
+
+    def check_module_imports(self, repo: Path, root: Path, modules: list[str]) -> list[tuple[str, str]]:
+        """
+
+        :param repo:
+        :param root:
+        :param modules:
+        :return:
+        """
+        failures: list[tuple[str, str]] = []
+        environment = self._test_environment(root)
+        for module in modules:
+            command = [sys.executable, "-c", f"import importlib; importlib.import_module({module!r})"]
+            result = subprocess.run(command, cwd=repo, env=environment, capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                message = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "import failed"
+                failures.append((module, message))
+        return failures
+
+    def ensure_modules_importable(self, repo: Path, root: Path, modules: list[str]) -> bool:
+        """
+
+        :param repo:
+        :param root:
+        :param modules:
+        :return:
+        """
+        failures = self.check_module_imports(repo, root, modules)
+        if not failures:
+            return True
+        for module, message in failures:
+            self.console.print(f"[red]Cannot import {module}:[/] {message}")
+        if not self.install_repository_requirements(repo):
+            return False
+        failures = self.check_module_imports(repo, root, modules)
+        for module, message in failures:
+            self.console.print(f"[red]Still cannot import {module}:[/] {message}")
+        return not failures
+
     def discover_modules(self, root: Path) -> list[str]:
         """
         Try to find the modules from the source root path of the repositories given. It tries to avoid some common names not useful for tests
@@ -163,16 +267,22 @@ class PynguinRunner:
 
             result = subprocess.run(command, cwd=repo, env={**os.environ, "PYNGUIN_DANGER_AWARE": "1"}, check=False)
 
-            compile_return_code = self.compile_generated_tests(output, repo, root) if compile_tests else None
-            test_return_code, branch_coverage = self.execute_generated_tests(output, repo, root, module) if execute_tests else (None, None)
+            generated_files = len(list(output.rglob("test_*.py")))
+            successful_generation = result.returncode == 0 and generated_files > 0
+            compile_return_code = self.compile_generated_tests(output, repo, root) if compile_tests and successful_generation else None
+            test_return_code, branch_coverage = self.execute_generated_tests(output, repo, root, module) if execute_tests and successful_generation else (None, None)
 
             report = RunReport(name, repo.name, str(root), module, algorithm, stop_criteria, stop_value, seed, assertion_generator, started,
                                round(time.monotonic() - timer, 3), result.returncode, str(output),
-                               len(list(output.rglob("test_*.py"))), command, compile_return_code,
+                               generated_files, command, compile_return_code,
                                test_return_code, branch_coverage, llm_configuration)
 
             (output.parent / "report.json").write_text(json.dumps(asdict(report), indent=2) + "\n")
             reports.append(report)
+            if not successful_generation:
+                self.console.print(
+                    f"[yellow]No tests were generated for {module}; continuing with the remaining modules.[/]"
+                )
 
         return reports
 
@@ -236,6 +346,8 @@ class PynguinRunner:
                 if "maximum_search_time" in data:
                     data["stop_criteria"] = "search-time"
                     data["stop_value"] = data.pop("maximum_search_time")
+                if "stop_criterion" in data:
+                    data["stop_criteria"] = data.pop("stop_criterion")
                 data.setdefault("assertion_generator", "MUTATION_ANALYSIS")
                 data.setdefault("compile_return_code", None)
                 data.setdefault("test_return_code", None)
@@ -269,9 +381,12 @@ class PynguinRunner:
     def interactive(self) -> None:
         self.console.print(Panel.fit("Interactive Pynguin Runner", style="bold cyan"))
         while True:
-            operation = Prompt.ask("Operation", choices=["run", "reports", "compare", "exit"], default="run")
+            operation = Prompt.ask("Operation", choices=["run", "requirements", "reports", "compare", "exit"], default="run")
             if operation == "exit": return
             reports = self.load_reports()
+            if operation == "requirements":
+                self._interactive_install_requirements()
+                continue
             if operation == "reports": self.show_reports(reports); continue
             if operation == "compare":
                 if len(reports) < 2: self.console.print("[yellow]At least two runs are required.[/]"); continue
@@ -288,15 +403,18 @@ class PynguinRunner:
         """
         repo = self._choose("Repository", self.repositories)
 
-        roots = self.find_source_roots(repo)
-        if not roots: self.console.print("[red]No Python modules found.[/]"); return
-        root = self._choose("Source root", roots)
+        root = self._choose_source_root(repo)
+        if root is None:
+            return
         available = self.discover_modules(root)
         self._numbered("Discovered modules", available)
 
         selection = Prompt.ask("Module numbers separated by commas, or 'all'", default="1")
         modules = available if selection.lower() == "all" else self._indexes(available, selection)
         if not modules: self.console.print("[red]No valid modules selected.[/]"); return
+        if not self.ensure_modules_importable(repo, root, modules):
+            self.console.print("[red]Run cancelled because selected modules are not importable.[/]")
+            return
 
         algorithm = Prompt.ask("Algorithm", choices=list(self.ALGORITHMS), default="DYNAMOSA")
         stop_criteria = Prompt.ask("Stopping criterion", choices=list(self.STOPPING_CRITERIA), default="search-time")
@@ -396,6 +514,57 @@ class PynguinRunner:
     def _percentage(value: float | None) -> str:
         return "N/A" if value is None else f"{value:.2f}%"
 
+    def _choose_source_root(self, repo: Path) -> Path | None:
+        """
+        
+        :param repo:
+        :return:
+        """
+        roots = self.find_source_roots(repo)
+        if roots:
+            self._numbered("Detected source roots", [str(root) for root in roots])
+            if Confirm.ask("Use one of the detected source roots?", default=True):
+                return self._choose("Source root", roots)
+        else:
+            self.console.print("[yellow]No source roots were detected automatically.[/]")
+
+        self.console.print("[dim]Enter '.' for the repository root, a repository-relative path such as 'src', or an absolute path. Leave blank to cancel.[/]")
+        while True:
+            raw_path = Prompt.ask("Custom source_root path", default="").strip()
+            if not raw_path:
+                return None
+
+            candidates = self._source_root_candidates(repo, raw_path)
+            for candidate in candidates:
+                if not candidate.is_dir() or not self.discover_modules(candidate):
+                    continue
+                if (candidate / "__init__.py").is_file():
+                    self.console.print(
+                        f"[red]That path is a Python package, not a source root:[/] {candidate}"
+                    )
+                    parent = candidate.parent
+                    if parent.is_dir() and self.discover_modules(parent):
+                        self.console.print(f"[yellow]Use its parent as source_root:[/] {parent}")
+                    continue
+                self.console.print(f"[green]Using custom source root:[/] {candidate}")
+                return candidate
+
+            attempted = ", ".join(str(candidate) for candidate in candidates)
+            self.console.print(f"[red]No valid Python source root found. Checked:[/] {attempted}")
+
+    @staticmethod
+    def _source_root_candidates(repo: Path, raw_path: str) -> list[Path]:
+        path = Path(raw_path).expanduser()
+        if path.is_absolute():
+            return [path.resolve()]
+
+        candidates = [(repo / path).resolve()]
+        if path.parts and path.parts[0] == repo.name:
+            repositories_relative = (repo.parent / path).resolve()
+            if repositories_relative not in candidates:
+                candidates.insert(0, repositories_relative)
+        return candidates
+
     def _choose(self, title: str, values: list[Path]) -> Path:
         self._numbered(title, [str(v) for v in values]); index = IntPrompt.ask(f"{title} number", default=1)
         while not 1 <= index <= len(values): index = IntPrompt.ask(f"Choose 1 to {len(values)}")
@@ -407,7 +576,7 @@ class PynguinRunner:
         self.console.print(table)
 
     @staticmethod
-    def _indexes(values: list[str], selection: str) -> list[str]:
+    def _indexes(values: list, selection: str) -> list:
         result = []
         for raw in selection.split(","):
             try:

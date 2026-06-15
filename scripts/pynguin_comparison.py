@@ -179,7 +179,7 @@ def main() -> int:
         console.print("[bold red]Error:[/] No repository URLs supplied and no current repositories found.")
         return 1
     try:
-        return run(repositories, config, args.dry_run)
+        return run(repositories, config, args.not_run)
     except (OSError, ValueError) as error:
         console.print(f"[bold red]Error:[/] {error}")
         return 1
