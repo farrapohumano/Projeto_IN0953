@@ -3,7 +3,7 @@
 This image clones Git repositories, discovers Python modules, runs Pynguin interactively, stores JSON reports, and compares previous runs.
 
 ## Apresentação
-https://docs.google.com/presentation/d/1ZsbvkBKP3tH6KSdj__L6scDWnXXVr__rEH1BNSpUo2k/edit?usp=sharing
+https://docs.google.com/presentation/d/1isoji6dwNoeVr6NxYzztV-x13cd3_L2wV3RnA9D1j98/edit?usp=sharing
 
 ## Build and launch
 
